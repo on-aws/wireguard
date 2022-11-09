@@ -2,75 +2,37 @@ AWSTemplateFormatVersion: '2010-09-09'
 Description: Wiregard server
 
 Parameters:
+  Endpoint:
+    Description: AWS Route53 RecordSet Name
+    Type: String
+  HostedZoneId:
+    Description: AWS Route53 HostedZone Id
+    Type: String
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+  PublicSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
+  PrivateSubnets:
+    Type: List<AWS::EC2::Subnet::Id>
   ImageId:
     Description: Amazon Linux 2
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
-    Default: /aws/service/ami-amazon-linux-latest/amzn2-ami-hvm-x86_64-ebs
+    Default: /aws/service/ami-amazon-linux-latest/al2022-ami-kernel-default-x86_64
 
 Resources:
-  ##########################################################################################
-  # VPC
-  ##########################################################################################
-  VPC:
-    Type: AWS::EC2::VPC
-    Properties:
-      CidrBlock:  10.192.0.0/16
-      EnableDnsSupport: true
-      EnableDnsHostnames: true
-
-  ##########################################################################################
-  # Public Subnets
-  ##########################################################################################
-  InternetGateway:
-    Type: AWS::EC2::InternetGateway
-
-  InternetGatewayAttachment:
-    Type: AWS::EC2::VPCGatewayAttachment
-    Properties:
-      InternetGatewayId: !Ref InternetGateway
-      VpcId: !Ref VPC
-
-  PublicSubnetA:
-    Type: AWS::EC2::Subnet
-    Properties:
-      VpcId: !Ref VPC
-      AvailabilityZone: !Select [ 0, !GetAZs '' ]
-      CidrBlock: 10.192.0.0/20
-      Tags:
-        - Key: Name
-          Value: PublicSubnetA
-
-  PublicRouteTable:
-    Type: AWS::EC2::RouteTable
-    Properties:
-      VpcId: !Ref VPC
-      Tags:
-        - Key: Name
-          Value: Public
-
-  PublicRoute:
-    Type: AWS::EC2::Route
-    DependsOn: InternetGatewayAttachment
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      DestinationCidrBlock: 0.0.0.0/0
-      GatewayId: !Ref InternetGateway
-
-  PublicSubnetARouteTableAssociation:
-    Type: AWS::EC2::SubnetRouteTableAssociation
-    Properties:
-      RouteTableId: !Ref PublicRouteTable
-      SubnetId: !Ref PublicSubnetA
-
   SecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
       GroupDescription: Group for VPN instance
-      VpcId:  !Ref VPC
+      VpcId: !Ref VpcId
       SecurityGroupIngress:
         - IpProtocol: udp
           FromPort: 51820
           ToPort: 51820
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 8080
+          ToPort: 8080
           CidrIp: 0.0.0.0/0
 
   InstanceRole:
@@ -88,6 +50,7 @@ Resources:
       Path: /
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+        - arn:aws:iam::aws:policy/SecretsManagerReadWrite
 
   InstanceProfile:
     Type: AWS::IAM::InstanceProfile
@@ -105,12 +68,6 @@ Resources:
       LaunchTemplateData:
         IamInstanceProfile:
           Arn: !GetAtt InstanceProfile.Arn
-        NetworkInterfaces:
-          - DeviceIndex: 0
-            AssociatePublicIpAddress: true
-            SubnetId: !Ref PublicSubnetA
-            Groups:
-              - !Ref SecurityGroup
         TagSpecifications:
           - ResourceType: instance
             Tags:
@@ -120,11 +77,13 @@ Resources:
           MarketType: spot
           SpotOptions:
             MaxPrice: 0.1
+            SpotInstanceType: persistent
+            InstanceInterruptionBehavior: stop
         UserData:
           Fn::Base64:
             Fn::Sub: |
               #!/bin/bash
-              yum upgrade
+              yum upgrade -y
               amazon-linux-extras install -y epel
               export rwfile="/etc/yum.repos.d/wireguard.repo"
               export rwurl="https://copr.fedorainfracloud.org/coprs/jdoss/wireguard/repo/epel-7/jdoss-wireguard-epel-7.repo"
@@ -137,11 +96,12 @@ Resources:
         config:
           packages:
             yum:
+              jq: []
               wireguard-dkms: []
               wireguard-tools: []
           files:
             /etc/wireguard/wg0.conf:
-              content: !Sub |
+              content: |
                 [Interface]
                 PrivateKey=
                 Address=10.0.0.1/24
@@ -149,36 +109,169 @@ Resources:
                 PostUp=iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE;
                 PostDown=iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE;
                 ListenPort=51820
+            /usr/local/bin/wg-health-check.py:
+              mode: "0755"
+              content: |
+                #!/usr/bin/env python2
+                from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
+                from optparse import OptionParser
+                from os import popen
+                class HealthCheck(BaseHTTPRequestHandler):
+                    def do_GET(self):
+                        if check(self.server.device):
+                            self.send_response(200)
+                            self.send_header("Content-Type", "text/plain")
+                            self.end_headers()
+                            self.wfile.write("healthy\n")
+                        else:
+                            self.send_response(404)
+                    def do_HEAD(self):
+                        self.do_GET()
+                def check(device):
+                    return popen("ip link show %s up " % device).read() != ""
+                def test(device):
+                    if check(device):
+                        print("%s up" % device)
+                    else:
+                        print("%s down" % device)
+                def main(port, device):
+                    server = HTTPServer(('', port), HealthCheck)
+                    server.device = device
+                    server.serve_forever()
+                def opts():
+                    parser = OptionParser(
+                            description="HTTP server that sends 200 response when device is up.")
+                    parser.add_option("-d", "--device", dest="device", default="wg0",
+                            help="device name to check (default wg0)")
+                    parser.add_option("-p", "--port", dest="port", default=8080, type="int",
+                            help="port on which to listen (default 8080)")
+                    parser.add_option("-t", "--test", action="store_true", dest="test", default=False,
+                            help="show status and exit")
+                    return parser.parse_args()[0]
+                if __name__ == "__main__":
+                    options = opts()
+                    if options.test:
+                        test(options.device)
+                    else:
+                        main(options.port, options.device)
+            /etc/systemd/system/wg-health-check.service:
+              content: |
+                [Unit]
+                Description=WireGuard health-check HTTP server
+                After=network-online.target
+
+                [Service]
+                Type=simple
+                User=nobody
+                ExecStart=/usr/local/bin/wg-health-check.py --device=wg0 --port=8080
+                Restart=always
+
+                [Install]
+                WantedBy=default.target
           commands:
-            00_enable_forwarding:
+            00_update:
+              command: |
+                yum update -y
+            01_enable_forwarding:
               command: |
                 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-            01_generate_keys:
-              command: |
+            02_generate_keys:
+              command: !Sub |
                 cd /etc/wireguard
                 umask 077
-                wg genkey | tee privatekey | wg pubkey > publickey
-            02_configure_wireguard:
+                SECRET=`aws secretsmanager get-secret-value --secret-id wg/keys --query SecretString --output text --region ${AWS::Region}`
+                echo "$SECRET"  | jq -r '.privatekey' > privatekey
+                echo "$SECRET"  | jq -r '.publickey' > publickey
+            03_configure_wireguard:
               command: |
                 cd /etc/wireguard
                 KEY=`cat privatekey` &&  sed -i "s@PrivateKey=@PrivateKey=$KEY@g" /etc/wireguard/wg0.conf
-            03_start:
+            04_start:
               command: |
                 systemctl enable wg-quick@wg0.service
                 systemctl start wg-quick@wg0.service
+            05_enable_health_check:
+              command: |
+                systemctl enable wg-health-check.service
+                systemctl start wg-health-check.service
 
-  Instance:
+  Instance1:
     Type: AWS::EC2::Instance
     Properties:
       ImageId: !Ref ImageId
-      InstanceType: t3.micro
+      InstanceType: t3.nano
+      SubnetId: !Select [ 0, !Ref PrivateSubnets ]
+      SecurityGroupIds:
+        - !Ref SecurityGroup
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+
+  Instance2:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Ref ImageId
+      InstanceType: t3.nano
+      SubnetId: !Select [ 1, !Ref PrivateSubnets ]
+      SecurityGroupIds:
+        - !Ref SecurityGroup
       LaunchTemplate:
         LaunchTemplateId: !Ref LaunchTemplate
         Version: !GetAtt LaunchTemplate.LatestVersionNumber
 
   WaitUserData:
     Type: AWS::CloudFormation::WaitCondition
-    DependsOn: Instance
+    DependsOn:
+      - Instance1
+      - Instance2
     Properties:
       Handle: !Ref UserDataHandle
       Timeout: 600
+      Count: 2
+
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      IpAddressType: ipv4
+      Subnets: !Ref PublicSubnets
+      Type: network
+
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckEnabled: true
+      HealthCheckProtocol: TCP
+      HealthCheckPort: 8080
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      HealthCheckIntervalSeconds: 10
+      Protocol: UDP
+      Port: 51820
+      TargetType: instance
+      Targets:
+        - Id: !Ref Instance1
+          Port: 51820
+        - Id: !Ref Instance2
+          Port: 51820
+      VpcId: !Ref VpcId
+
+  Listener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 1010
+      Protocol: UDP
+
+  RecordSet:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref Endpoint
+      Type: CNAME
+      TTL: 300
+      ResourceRecords:
+        - !GetAtt LoadBalancer.DNSName
+
