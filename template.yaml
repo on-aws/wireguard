@@ -14,6 +14,8 @@ Parameters:
     Type: List<AWS::EC2::Subnet::Id>
   PrivateSubnets:
     Type: List<AWS::EC2::Subnet::Id>
+  NatSecurityGroupId:
+    Type: AWS::EC2::SecurityGroup::Id
   ImageId:
     Description: Amazon Linux 2
     Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
@@ -34,6 +36,16 @@ Resources:
           FromPort: 8080
           ToPort: 8080
           CidrIp: 0.0.0.0/0
+
+  NatSecurityGroupIngress:
+    Type: AWS::EC2::SecurityGroupIngress
+    Properties:
+      Description: Allow traffic from WireGuard to NAT
+      GroupId: !Ref NatSecurityGroupId
+      IpProtocol: -1
+      FromPort: -1
+      ToPort: -1
+      SourceSecurityGroupId: !Ref SecurityGroup
 
   InstanceRole:
     Type: AWS::IAM::Role
@@ -83,12 +95,6 @@ Resources:
           Fn::Base64:
             Fn::Sub: |
               #!/bin/bash
-              yum upgrade -y
-              amazon-linux-extras install -y epel
-              export rwfile="/etc/yum.repos.d/wireguard.repo"
-              export rwurl="https://copr.fedorainfracloud.org/coprs/jdoss/wireguard/repo/epel-7/jdoss-wireguard-epel-7.repo"
-              wget --output-document="$rwfile" "$rwurl"
-              yum clean all
               /opt/aws/bin/cfn-init -v --stack ${AWS::StackName} --resource LaunchTemplate --region ${AWS::Region}
               /opt/aws/bin/cfn-signal '${UserDataHandle}'
     Metadata:
@@ -96,51 +102,82 @@ Resources:
         config:
           packages:
             yum:
+              iptables-services: []
               jq: []
-              wireguard-dkms: []
-              wireguard-tools: []
+              gcc: []
+              git: []
+              make: []
           files:
             /etc/wireguard/wg0.conf:
               content: |
                 [Interface]
                 PrivateKey=
-                Address=10.0.0.1/24
-                SaveConfig=true
-                PostUp=iptables -A FORWARD -i wg0 -j ACCEPT; iptables -t nat -A POSTROUTING -o eth0 -j MASQUERADE;
-                PostDown=iptables -D FORWARD -i wg0 -j ACCEPT; iptables -t nat -D POSTROUTING -o eth0 -j MASQUERADE;
+                Address=10.0.0.1/32
                 ListenPort=51820
+
+                # IP forwarding
+                PreUp = sysctl -w net.ipv4.ip_forward=1
+                # IP masquerading
+                PreUp = iptables -t mangle -A PREROUTING -i wg0 -j MARK --set-mark 0x30
+                PreUp = iptables -t nat -A POSTROUTING ! -o wg0 -m mark --mark 0x30 -j MASQUERADE
+                PostDown = iptables -t mangle -D PREROUTING -i wg0 -j MARK --set-mark 0x30
+                PostDown = iptables -t nat -D POSTROUTING ! -o wg0 -m mark --mark 0x30 -j MASQUERADE
+
+                [Peer]
+                # iPhone - Me
+                PublicKey = 3rynVN5oMxTtJkgwyOyPMni0FRKixPsDOpn30t+MGxY=
+                AllowedIPs = 10.0.0.2/32
+
+                [Peer]
+                # iPad Pro - Parents
+                PublicKey = 0IOJygzyne8/+blXUP3HCcKQPlQardLstSVLOLGoqEw=
+                AllowedIPs = 10.0.0.10/32
+
+                [Peer]
+                # iPhone - Mom
+                PublicKey = ZLpIGRj/UYHpsbxSXX8NNRXhH9AbxrXknMIDrynhui8=
+                AllowedIPs = 10.0.0.11/32
             /usr/local/bin/wg-health-check.py:
               mode: "0755"
               content: |
-                #!/usr/bin/env python2
-                from BaseHTTPServer import HTTPServer, BaseHTTPRequestHandler
+                #!/usr/bin/env python3
+                # -*- coding: utf-8 -*-
+
+                from http.server import HTTPServer, BaseHTTPRequestHandler
                 from optparse import OptionParser
                 from os import popen
+
                 class HealthCheck(BaseHTTPRequestHandler):
+
                     def do_GET(self):
                         if check(self.server.device):
                             self.send_response(200)
                             self.send_header("Content-Type", "text/plain")
                             self.end_headers()
-                            self.wfile.write("healthy\n")
+                            self.wfile.write(b"healthy\n")
                         else:
-                            self.send_response(404)
+                            self.send_error(404)
+
                     def do_HEAD(self):
                         self.do_GET()
+
                 def check(device):
                     return popen("ip link show %s up " % device).read() != ""
+
                 def test(device):
                     if check(device):
                         print("%s up" % device)
                     else:
                         print("%s down" % device)
+
                 def main(port, device):
                     server = HTTPServer(('', port), HealthCheck)
                     server.device = device
                     server.serve_forever()
+
                 def opts():
                     parser = OptionParser(
-                            description="HTTP server that sends 200 response when device is up.")
+                            description="HTTP server that sends 204 response when device is up.")
                     parser.add_option("-d", "--device", dest="device", default="wg0",
                             help="device name to check (default wg0)")
                     parser.add_option("-p", "--port", dest="port", default=8080, type="int",
@@ -148,6 +185,7 @@ Resources:
                     parser.add_option("-t", "--test", action="store_true", dest="test", default=False,
                             help="show status and exit")
                     return parser.parse_args()[0]
+
                 if __name__ == "__main__":
                     options = opts()
                     if options.test:
@@ -169,28 +207,34 @@ Resources:
                 [Install]
                 WantedBy=default.target
           commands:
-            00_update:
+            00_clone:
               command: |
-                yum update -y
-            01_enable_forwarding:
+                git clone https://git.zx2c4.com/wireguard-tools
+            01_build:
+              command: |
+                make -C wireguard-tools/src -j$(nproc)
+            02_install:
+              command: |
+                make -C wireguard-tools/src install
+            03_enable_forwarding:
               command: |
                 echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-            02_generate_keys:
+            04_generate_keys:
               command: !Sub |
                 cd /etc/wireguard
                 umask 077
                 SECRET=`aws secretsmanager get-secret-value --secret-id wg/keys --query SecretString --output text --region ${AWS::Region}`
                 echo "$SECRET"  | jq -r '.privatekey' > privatekey
                 echo "$SECRET"  | jq -r '.publickey' > publickey
-            03_configure_wireguard:
+            05_configure_wireguard:
               command: |
                 cd /etc/wireguard
                 KEY=`cat privatekey` &&  sed -i "s@PrivateKey=@PrivateKey=$KEY@g" /etc/wireguard/wg0.conf
-            04_start:
+            06_start:
               command: |
                 systemctl enable wg-quick@wg0.service
                 systemctl start wg-quick@wg0.service
-            05_enable_health_check:
+            07_enable_health_check:
               command: |
                 systemctl enable wg-health-check.service
                 systemctl start wg-health-check.service
@@ -203,6 +247,7 @@ Resources:
       SubnetId: !Select [ 0, !Ref PrivateSubnets ]
       SecurityGroupIds:
         - !Ref SecurityGroup
+      SourceDestCheck: false
       LaunchTemplate:
         LaunchTemplateId: !Ref LaunchTemplate
         Version: !GetAtt LaunchTemplate.LatestVersionNumber
@@ -215,6 +260,7 @@ Resources:
       SubnetId: !Select [ 1, !Ref PrivateSubnets ]
       SecurityGroupIds:
         - !Ref SecurityGroup
+      SourceDestCheck: false
       LaunchTemplate:
         LaunchTemplateId: !Ref LaunchTemplate
         Version: !GetAtt LaunchTemplate.LatestVersionNumber
