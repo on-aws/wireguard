@@ -112,7 +112,7 @@ Resources:
               content: |
                 [Interface]
                 PrivateKey=
-                Address=10.0.0.1/32
+                Address=10.0.0.1/24
                 ListenPort=51820
 
                 # IP forwarding
@@ -137,6 +137,11 @@ Resources:
                 # iPhone - Mom
                 PublicKey = ZLpIGRj/UYHpsbxSXX8NNRXhH9AbxrXknMIDrynhui8=
                 AllowedIPs = 10.0.0.11/32
+
+                [Peer]
+                # iPhone - Nastia
+                PublicKey = no18RFIyAMA4WijOxuvShj5l2YoaSrt7arhd/zpq+Go=
+                AllowedIPs = 10.0.0.20/32
             /usr/local/bin/wg-health-check.py:
               mode: "0755"
               content: |
@@ -216,25 +221,22 @@ Resources:
             02_install:
               command: |
                 make -C wireguard-tools/src install
-            03_enable_forwarding:
-              command: |
-                echo "net.ipv4.ip_forward=1" >> /etc/sysctl.conf
-            04_generate_keys:
+            03_generate_keys:
               command: !Sub |
                 cd /etc/wireguard
                 umask 077
                 SECRET=`aws secretsmanager get-secret-value --secret-id wg/keys --query SecretString --output text --region ${AWS::Region}`
                 echo "$SECRET"  | jq -r '.privatekey' > privatekey
                 echo "$SECRET"  | jq -r '.publickey' > publickey
-            05_configure_wireguard:
+            04_configure_wireguard:
               command: |
                 cd /etc/wireguard
                 KEY=`cat privatekey` &&  sed -i "s@PrivateKey=@PrivateKey=$KEY@g" /etc/wireguard/wg0.conf
-            06_start:
+            05_start:
               command: |
                 systemctl enable wg-quick@wg0.service
                 systemctl start wg-quick@wg0.service
-            07_enable_health_check:
+            06_enable_health_check:
               command: |
                 systemctl enable wg-health-check.service
                 systemctl start wg-health-check.service
