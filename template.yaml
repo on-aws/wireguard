@@ -124,22 +124,22 @@ Resources:
                 PostDown = iptables -t nat -D POSTROUTING ! -o wg0 -m mark --mark 0x30 -j MASQUERADE
 
                 [Peer]
-                # iPhone - Me
+                # Device 1
                 PublicKey = 3rynVN5oMxTtJkgwyOyPMni0FRKixPsDOpn30t+MGxY=
                 AllowedIPs = 10.0.0.2/32
 
                 [Peer]
-                # iPad Pro - Parents
+                # Device 2
                 PublicKey = 0IOJygzyne8/+blXUP3HCcKQPlQardLstSVLOLGoqEw=
                 AllowedIPs = 10.0.0.10/32
 
                 [Peer]
-                # iPhone - Mom
+                # Device 3
                 PublicKey = ZLpIGRj/UYHpsbxSXX8NNRXhH9AbxrXknMIDrynhui8=
                 AllowedIPs = 10.0.0.11/32
 
                 [Peer]
-                # iPhone - Nastia
+                # Device 4
                 PublicKey = no18RFIyAMA4WijOxuvShj5l2YoaSrt7arhd/zpq+Go=
                 AllowedIPs = 10.0.0.20/32
             /usr/local/bin/wg-health-check.py:
