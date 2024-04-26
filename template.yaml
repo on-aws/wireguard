@@ -129,6 +129,11 @@ Resources:
                 AllowedIPs = 10.0.0.2/32
 
                 [Peer]
+                # Device 1.1
+                PublicKey = DnNcSC+eeHGPMP2ko1Zx6rH6Pi2qonTT3L083zxrYyo=
+                AllowedIPs = 10.0.0.3/32
+
+                [Peer]
                 # Device 2
                 PublicKey = 0IOJygzyne8/+blXUP3HCcKQPlQardLstSVLOLGoqEw=
                 AllowedIPs = 10.0.0.10/32
