@@ -134,6 +134,11 @@ Resources:
                 AllowedIPs = 10.0.0.3/32
 
                 [Peer]
+                # Device (O.V)
+                PublicKey = U08XlAi9Dmcv3naYV4JkksldEtbjkN3rHTKwePKGxkE=
+                AllowedIPs = 10.0.0.4/32
+
+                [Peer]
                 # Device 2
                 PublicKey = 0IOJygzyne8/+blXUP3HCcKQPlQardLstSVLOLGoqEw=
                 AllowedIPs = 10.0.0.10/32
