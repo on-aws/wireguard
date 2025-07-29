@@ -157,6 +157,11 @@ Resources:
                 # Device 5
                 PublicKey = DnNcSC+eeHGPMP2ko1Zx6rH6Pi2qonTT3L083zxrYyo=
                 AllowedIPs = 10.0.0.30/32
+
+                [Peer]
+                # ER605
+                PublicKey = Q8AF+fxh7ZhOnf07T/i9d2TZ1NP0EcXSf+qJZieFtgY=
+                AllowedIPs = 10.0.0.100/32
             /usr/local/bin/wg-health-check.py:
               mode: "0755"
               content: |
